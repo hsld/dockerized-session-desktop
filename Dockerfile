@@ -2,6 +2,9 @@
 FROM debian:12-slim AS builder
 ARG DEBIAN_FRONTEND=noninteractive
 
+# Use bash with pipefail globally (so any pipeline failure fails the RUN)
+SHELL ["/bin/bash","-o","pipefail","-lc"]
+
 # ---- tweakables ----
 ARG SESSION_REPO=https://github.com/session-foundation/session-desktop.git
 ARG SESSION_REF=v1.16.7           # pin to a stable release tag
@@ -22,14 +25,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
 # ---- unprivileged user ----
-RUN groupadd -g ${GID} ${USER} && useradd -m -u ${UID} -g ${GID} ${USER}
+RUN groupadd -g ${GID} ${USER} && useradd -l -m -u ${UID} -g ${GID} ${USER}
 USER ${USER}
 WORKDIR /home/${USER}
 
 # ---- Node via nvm ----
 ENV NVM_DIR=/home/${USER}/.nvm
 RUN mkdir -p "$NVM_DIR" && curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-SHELL ["/bin/bash", "-lc"]
 
 # ---- Python 3.12 via pyenv ----
 ENV PYENV_ROOT=/home/${USER}/.pyenv
