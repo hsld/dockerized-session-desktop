@@ -10,12 +10,13 @@ Build a **Session Desktop** AppImage entirely inside Docker. The host stays clea
 - **Auto-patch** for a known f-string issue in `tools/localization/localeTypes.py` on the 1.16.x line.
 - **Stable packaging** with `electron-builder@24` and `--publish=never`.
 - **Non-root artifacts**: builds as an unprivileged user.
+- **One-command helper script** (`build_session-desktop.sh`) that does the Docker build **and** copies artifacts out for you.
 
 ## Prerequisites
 
 - Docker (BuildKit recommended)
 
-## Quick start
+## Quick start (Docker CLI)
 
 ~~~bash
 # Build the image (pinned to a stable tag by default)
@@ -41,6 +42,31 @@ latest-linux.yml
 builder-debug.yml
 linux-unpacked/
 ~~~
+
+## Quick start (wrapper script)
+
+Prefer a single command that builds **and** copies out artifacts? Use the helper script:
+
+~~~bash
+# run the wrapper (auto-picks latest release unless you pass a tag)
+./build_session-desktop.sh
+
+# or pin a specific tag:
+./build_session-desktop.sh v1.16.7
+
+# optional envs
+OUT_DIR=out       \   # where to place artifacts (default: ./out)
+NO_CACHE=0        \   # allow Docker cache (default: 1 = no-cache)
+DOCKERFILE=./Dockerfile \
+./build_session-desktop.sh
+~~~
+
+What it does:
+
+- Determines the tag (CLI arg > $SESSION_REF env > GitHub latest > git tag fallback).
+- Builds the Docker image with that tag.
+- Creates an ephemeral container and **copies `/out` to `./out/`**.
+- Cleans up the container and image.
 
 ## Build args
 
@@ -84,10 +110,10 @@ docker build -t session-desktop:mytag \
 
 - Cache electron-builder downloads:
 
-~~~ dockerfile
+  ~~~dockerfile
   ENV ELECTRON_BUILDER_CACHE=/home/node/.cache/electron-builder
-~~~
+  ~~~
 
 ## License & Credits
 
-This repo only provides a Dockerized build wrapper for **Session Desktop**. All code, licenses, and trademarks for Signal belong to their respective owners.
+This repo only provides a Dockerized build wrapper for **Session Desktop**. All code, licenses, and trademarks for Session belong to their respective owners.
