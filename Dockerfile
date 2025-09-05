@@ -29,7 +29,13 @@ ARG SESSION_REF=v1.16.7           # pin to a stable release tag
 ARG USER=node
 ARG UID=1000
 ARG GID=1000
-ARG NODE_DEFAULT=20.18.2           # fallback if no .nvmrc
+ARG NODE_DEFAULT=20.18.2          # fallback if no .nvmrc
+ARG ELECTRON_BUILDER_VERSION=24   # pin electron-builder for reproducibility
+
+# Helpful non-interactive defaults
+ENV CI=1 \
+    npm_config_fund=false \
+    npm_config_audit=false
 
 # ---- system deps (electron/native modules/packaging + pyenv build deps) ----
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -40,7 +46,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fakeroot rpm dpkg xz-utils file \
     make libssl-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev \
     libffi-dev liblzma-dev tk-dev wget \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && git lfs install --system
 
 # ---- unprivileged user ----
 RUN groupadd -g ${GID} ${USER} && useradd -l -m -u ${UID} -g ${GID} ${USER}
@@ -66,23 +73,19 @@ RUN curl -fsSL https://pyenv.run | bash && \
 RUN git clone --depth=1 --branch "${SESSION_REF}" "${SESSION_REPO}" app
 WORKDIR /home/${USER}/app
 
-# ---- Ensure Python constants exist + fix any backslash-in-fstring joins ----
-# ---- Note to myself: Really ? I mean WTF dead session team ? ----
+# ---- Compat patch: ensure constants + fix backslash-in-fstring joins ----
 RUN python3 - <<'PY'
 from pathlib import Path
 import re
-
 p = Path("tools/localization/localeTypes.py")
 if not p.exists():
     print("Patch note: localeTypes.py not present; skipping.")
     raise SystemExit(0)
-
 s = p.read_text()
 
 # 1) Ensure constants exist (needed on stable tag which already references them)
 if "SEP_NL" not in s or "SEP_COMMA_NL" not in s:
     lines = s.splitlines()
-    # find insertion point: after encoding/shebang/comments/imports
     insert_at = 0
     for i, line in enumerate(lines[:120]):
         if (line.startswith(("from ", "import ")) or
@@ -100,9 +103,8 @@ if "SEP_NL" not in s or "SEP_COMMA_NL" not in s:
     lines[insert_at:insert_at] = inject
     s = "\n".join(lines)
 
-# 2) (Safety) Replace {"\n".join(...)} with {SEP_NL.join(...)} if present
+# 2) Replace {"\n".join(...)} with {SEP_NL.join(...)} if present
 s = re.sub(r'\{\s*["\']\\n["\']\.join\((.*?)\)\s*\}', r'{SEP_NL.join(\1)}', s)
-
 p.write_text(s)
 print("localeTypes.py patched: constants ensured + joins normalized")
 PY
@@ -127,6 +129,9 @@ RUN source "$NVM_DIR/nvm.sh"; \
 # Avoid git hooks (husky) in container builds
 ENV HUSKY=0
 
+# Optional: give Node a little more headroom for ts builds
+ENV NODE_OPTIONS=--max_old_space_size=4096
+
 # ---- build (force pyenv Python on PATH for this RUN) ----
 RUN export PYENV_ROOT="$HOME/.pyenv"; \
     export PATH="$PYENV_ROOT/shims:$PYENV_ROOT/bin:$PATH"; \
@@ -135,12 +140,18 @@ RUN export PYENV_ROOT="$HOME/.pyenv"; \
     source "$NVM_DIR/nvm.sh"; corepack enable; \
     yarn run build
 
-# ---- package AppImage with a stable electron-builder ----
+# ---- package AppImage with a pinned electron-builder ----
 ENV ELECTRON_BUILDER_CACHE=/home/${USER}/.cache/electron-builder
 RUN source "$NVM_DIR/nvm.sh"; \
-    npx electron-builder@24 --linux AppImage --publish=never \
+    npx "electron-builder@${ELECTRON_BUILDER_VERSION}" --linux AppImage --publish=never \
     --config.extraMetadata.environment=production
 
-# -------- exporter: only artifacts --------
+# -------- exporter: only artifacts (owned by 1000:1000 by default) --------
 FROM debian:12-slim AS exporter
-COPY --from=builder /home/node/app/dist /out
+SHELL ["/bin/bash","-o","pipefail","-lc"]
+ARG ARTIFACT_UID=1000
+ARG ARTIFACT_GID=1000
+RUN groupadd -g ${ARTIFACT_GID} app && useradd -l -m -u ${ARTIFACT_UID} -g ${ARTIFACT_GID} app
+USER app
+WORKDIR /out
+COPY --from=builder --chown=app:app /home/node/app/dist/ /out/
