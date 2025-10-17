@@ -16,28 +16,25 @@
 #
 # Contact: https://github.com/hsld/dockerized-session-desktop/issues
 
-# Build Session Desktop AppImage entirely inside Debian 12 (stable, with pyenv & f-string fix)
-FROM debian:12-slim AS builder
+# Build Session Desktop AppImage entirely inside Debian 13 (trixie, with pyenv & f-string fix)
+FROM debian:13-slim AS builder
 ARG DEBIAN_FRONTEND=noninteractive
-
-# Use bash with pipefail globally (so any pipeline failure fails the RUN)
 SHELL ["/bin/bash","-o","pipefail","-lc"]
 
 # ---- tweakables ----
 ARG SESSION_REPO=https://github.com/session-foundation/session-desktop.git
-ARG SESSION_REF=v1.16.10           # pin to a stable release tag
+ARG SESSION_REF=v1.16.10
 ARG USER=node
 ARG UID=1000
 ARG GID=1000
-ARG NODE_DEFAULT=20.18.2          # fallback if no .nvmrc
-ARG ELECTRON_BUILDER_VERSION=24   # pin electron-builder for reproducibility
+ARG NODE_DEFAULT=20.18.2
+ARG ELECTRON_BUILDER_VERSION=24
 
-# Helpful non-interactive defaults
 ENV CI=1 \
   npm_config_fund=false \
   npm_config_audit=false
 
-# ---- system deps (electron/native modules/packaging + pyenv build deps) ----
+# ---- system deps ----
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates curl git git-lfs gnupg build-essential \
   cmake ninja-build pkg-config \
@@ -73,7 +70,7 @@ RUN curl -fsSL https://pyenv.run | bash && \
 RUN git clone --depth=1 --branch "${SESSION_REF}" "${SESSION_REPO}" app
 WORKDIR /home/${USER}/app
 
-# ---- Compat patch: ensure constants + fix backslash-in-fstring joins ----
+# ---- compat patch ----
 RUN python3 - <<'PY'
 from pathlib import Path
 import re
@@ -82,8 +79,6 @@ if not p.exists():
     print("Patch note: localeTypes.py not present; skipping.")
     raise SystemExit(0)
 s = p.read_text()
-
-# 1) Ensure constants exist (needed on stable tag which already references them)
 if "SEP_NL" not in s or "SEP_COMMA_NL" not in s:
     lines = s.splitlines()
     insert_at = 0
@@ -102,8 +97,6 @@ if "SEP_NL" not in s or "SEP_COMMA_NL" not in s:
         inject.append('SEP_COMMA_NL = ",\\n      "')
     lines[insert_at:insert_at] = inject
     s = "\n".join(lines)
-
-# 2) Replace {"\n".join(...)} with {SEP_NL.join(...)} if present
 s = re.sub(r'\{\s*["\']\\n["\']\.join\((.*?)\)\s*\}', r'{SEP_NL.join(\1)}', s)
 p.write_text(s)
 print("localeTypes.py patched: constants ensured + joins normalized")
@@ -120,19 +113,16 @@ RUN if [[ -f .nvmrc ]]; then NODE_VERSION="$(cat .nvmrc)"; else NODE_VERSION="${
 RUN source "$NVM_DIR/nvm.sh"; \
   corepack enable; \
   if [[ -f yarn.lock ]]; then \
-  yarn --version >/dev/null 2>&1; \
-  yarn install --immutable || yarn install; \
+    yarn --version >/dev/null 2>&1; \
+    yarn install --immutable || yarn install; \
   else \
-  (npm ci || npm install); \
+    (npm ci || npm install); \
   fi
 
-# Avoid git hooks (husky) in container builds
 ENV HUSKY=0
-
-# Optional: give Node a little more headroom for ts builds
 ENV NODE_OPTIONS=--max_old_space_size=4096
 
-# ---- build (force pyenv Python on PATH for this RUN) ----
+# ---- build ----
 RUN export PYENV_ROOT="$HOME/.pyenv"; \
   export PATH="$PYENV_ROOT/shims:$PYENV_ROOT/bin:$PATH"; \
   eval "$("$PYENV_ROOT/bin/pyenv" init -)"; \
@@ -140,14 +130,14 @@ RUN export PYENV_ROOT="$HOME/.pyenv"; \
   source "$NVM_DIR/nvm.sh"; corepack enable; \
   yarn run build
 
-# ---- package AppImage with a pinned electron-builder ----
+# ---- package AppImage ----
 ENV ELECTRON_BUILDER_CACHE=/home/${USER}/.cache/electron-builder
 RUN source "$NVM_DIR/nvm.sh"; \
   npx "electron-builder@${ELECTRON_BUILDER_VERSION}" --linux AppImage --publish=never \
   --config.extraMetadata.environment=production
 
-# -------- exporter: only artifacts (owned by 1000:1000 by default) --------
-FROM debian:12-slim AS exporter
+# -------- exporter --------
+FROM debian:13-slim AS exporter
 SHELL ["/bin/bash","-o","pipefail","-lc"]
 ARG ARTIFACT_UID=1000
 ARG ARTIFACT_GID=1000
