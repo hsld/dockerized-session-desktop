@@ -18,6 +18,9 @@
 #
 # Contact: https://github.com/hsld/dockerized-session-desktop/issues
 
+# Exit immediately if any command fails
+# Treat unset variables as errors
+# Ensure the whole pipeline fails if any one command in it fails
 set -euo pipefail
 
 # ----------------------------- config ---------------------------------
@@ -29,6 +32,7 @@ NO_CACHE="${NO_CACHE:-1}"              # set to 0 to allow cache
 PROGRESS="${PROGRESS:-auto}"           # auto|plain
 # ----------------------------------------------------------------------
 
+# Proivde some user comfort by telling them what we're doing
 say() { printf "\033[1;36m>> %s\033[0m\n" "$*"; }
 warn() { printf "\033[1;33m!! %s\033[0m\n" "$*"; }
 die() {
@@ -36,11 +40,13 @@ die() {
     exit 1
 }
 
+# Make sure all dependancies are satisfied
 need() { command -v "$1" >/dev/null 2>&1 || die "Missing dependency: $1"; }
 need docker
 need curl
 need git
 
+# Get whatever is currently latest (from API)
 latest_tag_from_api() {
     local tag=""
     if command -v jq >/dev/null 2>&1; then
@@ -53,6 +59,7 @@ latest_tag_from_api() {
     printf "%s" "${tag}"
 }
 
+# Get whatever is currently latest (from refs)
 latest_tag_from_refs() {
     git ls-remote --tags "https://github.com/${REPO_SLUG}.git" |
         awk -F/ '/refs\/tags\/v?[0-9]/{print $3}' |
@@ -61,6 +68,7 @@ latest_tag_from_refs() {
         tail -1
 }
 
+# Pick a ref to build if none was specified
 pick_tag() {
     local arg_tag="${1:-}"
     if [[ -n "${arg_tag}" ]]; then
@@ -81,11 +89,13 @@ pick_tag() {
     printf "%s" "${t}"
 }
 
+# Enable the build kit
 enable_buildkit() {
     export DOCKER_BUILDKIT=1
     export COMPOSE_DOCKER_CLI_BUILD=1
 }
 
+# Export artifacts to user filesystem
 copy_out() {
     local cid="$1" dst="${OUT_DIR}"
     say "Exporting AppImage artifact(s) only…"
@@ -98,6 +108,7 @@ copy_out() {
     ls -lh "${dst}" || true
 }
 
+#  Clean up after the build process finished
 clean_objects() {
     local cid="$1" img="$2"
     (
@@ -107,6 +118,20 @@ clean_objects() {
     )
 }
 
+#
+# The actual build process looks like this:
+#
+# 1. Determine build ref
+# 2. Announce target
+# 3. Enable build kit
+# 4. Validate docker file
+# 5. Prepare build args
+# 6. Build image
+# 7. Create container
+# 8. Set cleanup trap
+# 9. Extract artifacts
+# 10. Cleanup
+#
 main() {
     local want_tag
     want_tag="$(pick_tag "${1:-}")"
