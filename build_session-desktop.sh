@@ -88,9 +88,12 @@ enable_buildkit() {
 
 copy_out() {
     local cid="$1" dst="${OUT_DIR}"
-    mkdir -p "${dst}"
     say "Exporting AppImage artifact(s) only…"
-    docker cp "${cid}:/out/." "${dst}/"
+    umask 022
+    rm -rf "${dst}"
+    mkdir -p "${dst}"
+    docker cp "${cid}:/out/." - |
+        tar --extract --no-same-owner --no-same-permissions --directory "${dst}"
     echo ">> Done. Artifacts in: ${dst}"
     ls -lh "${dst}" || true
 }
