@@ -1,119 +1,114 @@
 # dockerized-session-desktop
 
-Build a **Session Desktop** AppImage entirely inside Docker. The host stays clean; only the final artifacts are copied out.
+Build Session Desktop for Linux (AppImage, DEB, or RPM) inside a clean Docker environment.  
+The build runs entirely in a container, and only the finished artifacts are copied to your host system.
 
 ## Features
 
-- **Hermetic build** on Debian 12 (`debian:12-slim`).
-- **Node via nvm** (respects repo `.nvmrc`, with safe fallback).
-- **Python 3.12 via pyenv** for the localization tools.
-- **Auto-patch** for a known f-string issue in `tools/localization/localeTypes.py` on the 1.16.x line.
-- **Stable packaging** with `electron-builder@24` and `--publish=never`.
-- **Non-root artifacts**: builds as an unprivileged user.
-- **One-command helper script** (`build_session-desktop.sh`) that does the Docker build **and** copies artifacts out for you.
+- Debian 13 (Trixie) base image with modern build dependencies  
+- Uses Node.js (via NVM) and Python (via pyenv) inside the container  
+- Pinned versions of key tools for reproducible builds  
+- Supports multiple Linux targets via the `LINUX_TARGETS` build argument  
+  (for example: `appImage`, `deb`, `rpm`, or `deb,rpm,appimage`)  
+- Uses a pinned version of `electron-builder` for consistent output  
+- Includes a helper build script (`build_session-desktop.sh`) that:  
+  - Determines the latest Session Desktop release automatically  
+  - Builds the Docker image with Docker BuildKit  
+  - Exports the resulting artifacts to `./out`  
 
-## Prerequisites
+## Requirements
 
-- Docker (BuildKit recommended)
+- Docker installed and accessible by your user  
+- Internet access for fetching the Session source and dependencies  
 
-## Quick start (Docker CLI)
+## Quick Start (manual Docker commands)
 
-~~~bash
-# Build the image (pinned to a stable tag by default)
+Build a specific version of Session Desktop:
+
+```bash
 docker build --pull \
-  --build-arg SESSION_REF=v1.16.7 \
+  --build-arg SESSION_REF=v1.16.10 \
   -t session-desktop-builder .
+```
 
-# Copy artifacts out of the image
-CID="$(docker create session-desktop-builder)"
+Run the build:
+
+```bash
+docker run --rm \
+  -e LINUX_TARGETS="appimage" \
+  -e GH_TOKEN=skip \
+  --name session-temp \
+  session-desktop-builder
+```
+
+Copy artifacts from the container:
+
+```bash
+CID=$(docker create session-desktop-builder)
 mkdir -p out
 docker cp "$CID:/out/." ./out/
 docker rm -f "$CID" >/dev/null
-
-# Inspect results
 ls -lh out
-~~~
+```
 
-You should see something like:
+## Quick Start (wrapper script)
 
-~~~
-session-desktop-linux-x86_64-1.16.7.AppImage
-latest-linux.yml
-builder-debug.yml
-linux-unpacked/
-~~~
+The included build script automates the entire process.
 
-## Quick start (wrapper script)
+Default build (latest stable tag, AppImage target):
 
-Prefer a single command that builds **and** copies out artifacts? Use the helper script:
-
-~~~bash
-# run the wrapper (auto-picks latest release unless you pass a tag)
+```bash
 ./build_session-desktop.sh
+```
 
-# or pin a specific tag:
-./build_session-desktop.sh v1.16.7
+Build specific targets:
 
-# optional envs
-OUT_DIR=out       \   # where to place artifacts (default: ./out)
-NO_CACHE=0        \   # allow Docker cache (default: 1 = no-cache)
-DOCKERFILE=./Dockerfile \
-./build_session-desktop.sh
-~~~
+```bash
+LINUX_TARGETS="deb,rpm" ./build_session-desktop.sh
+```
+
+Build from a custom branch or repository:
+
+```bash
+SESSION_REF=main LINUX_TARGETS="appimage" ./build_session-desktop.sh
+```
 
 What it does:
 
-- Determines the tag (CLI arg > $SESSION_REF env > GitHub latest > git tag fallback).
-- Builds the Docker image with that tag.
-- Creates an ephemeral container and **copies `/out` to `./out/`**.
-- Cleans up the container and image.
+- Determines the latest Session release automatically (via GitHub API)  
+- Builds a Docker image using the included Dockerfile  
+- Runs the containerized build  
+- Copies resulting artifacts to `./out`  
+- Cleans up temporary containers and images  
 
-## Build args
+## Configuration
 
-| Arg            | Default                                                     | Notes                                      |
-|----------------|-------------------------------------------------------------|--------------------------------------------|
-| `SESSION_REPO` | `https://github.com/session-foundation/session-desktop.git` | Upstream repo                              |
-| `SESSION_REF`  | `v1.16.7`                                                   | Tag/branch to build                        |
-| `NODE_DEFAULT` | `20.18.2`                                                   | Used only if repo lacks `.nvmrc`           |
-| `UID`/`GID`    | `1000`/`1000`                                               | Owner of files created in the container    |
+You can override these environment variables:
 
-Example:
+- `LINUX_TARGETS` — Build targets (`appimage`, `deb`, `rpm`)  
+- `SESSION_REF` — Git tag, branch, or commit to build  
+- `ARTIFACT_UID` / `ARTIFACT_GID` — Ownership of exported files  
+- `NO_CACHE` — Set to 0 to allow Docker cache reuse  
+- `PROGRESS` — Build output mode (`auto`, `plain`)  
 
-~~~bash
-docker build -t session-desktop:mytag \
-  --build-arg SESSION_REF=v1.16.8 \
-  --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" .
-~~~
+## Troubleshooting
 
-## How it works
+If you see permission denied errors:  
 
-- Base image installs toolchains & Electron runtime libs.
-- Adds a non-root user.
-- Installs **Node (nvm)** and **Python 3.12 (pyenv)**.
-- Clones Session at `SESSION_REF`.
-- Patches `localeTypes.py` (adds constants & replaces `"\n".join(...)`).
-- `yarn install` + `yarn run build`.
-- Packages via `npx electron-builder@24 --linux AppImage --publish=never`.
-- Final stage exports `/home/node/app/dist` to `/out`.
+- Ensure your user is part of the docker group  
+- Run `newgrp docker` after adding yourself to the group  
+- Rebuild with `sudo` only as a last resort  
 
-## Tips
+If the build fails during pyenv or NVM setup:  
 
-- Use a `.dockerignore` to keep contexts small:
+- Check Docker network connectivity  
+- Try rebuilding with `--no-cache`  
 
-  ~~~
-  node_modules
-  dist
-  out
-  .git
-  *.AppImage
-  ~~~
+If electron-builder warns about publishing:  
 
-- Cache electron-builder downloads:
+- Pass `GH_TOKEN=skip` to disable all release uploads  
 
-  ~~~dockerfile
-  ENV ELECTRON_BUILDER_CACHE=/home/node/.cache/electron-builder
-  ~~~
+## License and Credits
 
-## License & Credits
-
-This repo only provides a Dockerized build wrapper for **Session Desktop**. All code, licenses, and trademarks for Session belong to their respective owners.
+This project provides only the Docker-based build environment.  
+Session Desktop and all associated code, licenses, and trademarks belong to the Session Foundation.
