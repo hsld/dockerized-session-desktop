@@ -25,7 +25,7 @@ SHELL ["/bin/bash","-o","pipefail","-lc"]
 
 # ---- tweakables ----
 ARG SESSION_REPO=https://github.com/session-foundation/session-desktop.git
-ARG SESSION_REF=v1.16.7           # pin to a stable release tag
+ARG SESSION_REF=v1.16.10           # pin to a stable release tag
 ARG USER=node
 ARG UID=1000
 ARG GID=1000
@@ -34,20 +34,20 @@ ARG ELECTRON_BUILDER_VERSION=24   # pin electron-builder for reproducibility
 
 # Helpful non-interactive defaults
 ENV CI=1 \
-    npm_config_fund=false \
-    npm_config_audit=false
+  npm_config_fund=false \
+  npm_config_audit=false
 
 # ---- system deps (electron/native modules/packaging + pyenv build deps) ----
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl git git-lfs gnupg build-essential \
-    cmake ninja-build pkg-config \
-    libx11-dev libxkbfile-dev libsecret-1-dev \
-    libgtk-3-0 libnss3 libasound2 \
-    fakeroot rpm dpkg xz-utils file \
-    make libssl-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev \
-    libffi-dev liblzma-dev tk-dev wget \
-    && rm -rf /var/lib/apt/lists/* \
-    && git lfs install --system
+  ca-certificates curl git git-lfs gnupg build-essential \
+  cmake ninja-build pkg-config \
+  libx11-dev libxkbfile-dev libsecret-1-dev \
+  libgtk-3-0 libnss3 libasound2 \
+  fakeroot rpm dpkg xz-utils file \
+  make libssl-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev \
+  libffi-dev liblzma-dev tk-dev wget \
+  && rm -rf /var/lib/apt/lists/* \
+  && git lfs install --system
 
 # ---- unprivileged user ----
 RUN groupadd -g ${GID} ${USER} && useradd -l -m -u ${UID} -g ${GID} ${USER}
@@ -62,12 +62,12 @@ RUN mkdir -p "$NVM_DIR" && curl -fsSL https://raw.githubusercontent.com/nvm-sh/n
 ENV PYENV_ROOT=/home/${USER}/.pyenv
 ENV PATH=${PYENV_ROOT}/bin:${PYENV_ROOT}/shims:${PATH}
 RUN curl -fsSL https://pyenv.run | bash && \
-    export PYENV_ROOT="$HOME/.pyenv" && \
-    export PATH="$PYENV_ROOT/bin:$PATH" && \
-    "$PYENV_ROOT/bin/pyenv" install -s 3.12.5 && \
-    "$PYENV_ROOT/bin/pyenv" global 3.12.5 && \
-    eval "$("$PYENV_ROOT/bin/pyenv" init -)" && \
-    python3 --version
+  export PYENV_ROOT="$HOME/.pyenv" && \
+  export PATH="$PYENV_ROOT/bin:$PATH" && \
+  "$PYENV_ROOT/bin/pyenv" install -s 3.12.5 && \
+  "$PYENV_ROOT/bin/pyenv" global 3.12.5 && \
+  eval "$("$PYENV_ROOT/bin/pyenv" init -)" && \
+  python3 --version
 
 # ---- fetch source (pinned tag) ----
 RUN git clone --depth=1 --branch "${SESSION_REF}" "${SESSION_REPO}" app
@@ -111,20 +111,20 @@ PY
 
 # ---- tool versions & install deps ----
 RUN if [[ -f .nvmrc ]]; then NODE_VERSION="$(cat .nvmrc)"; else NODE_VERSION="${NODE_DEFAULT}"; fi; \
-    source "$NVM_DIR/nvm.sh"; \
-    nvm install "$NODE_VERSION"; \
-    nvm use "$NODE_VERSION"; \
-    corepack enable; \
-    yarn config set network-timeout 600000
+  source "$NVM_DIR/nvm.sh"; \
+  nvm install "$NODE_VERSION"; \
+  nvm use "$NODE_VERSION"; \
+  corepack enable; \
+  yarn config set network-timeout 600000
 
 RUN source "$NVM_DIR/nvm.sh"; \
-    corepack enable; \
-    if [[ -f yarn.lock ]]; then \
-    yarn --version >/dev/null 2>&1; \
-    yarn install --immutable || yarn install; \
-    else \
-    (npm ci || npm install); \
-    fi
+  corepack enable; \
+  if [[ -f yarn.lock ]]; then \
+  yarn --version >/dev/null 2>&1; \
+  yarn install --immutable || yarn install; \
+  else \
+  (npm ci || npm install); \
+  fi
 
 # Avoid git hooks (husky) in container builds
 ENV HUSKY=0
@@ -134,17 +134,17 @@ ENV NODE_OPTIONS=--max_old_space_size=4096
 
 # ---- build (force pyenv Python on PATH for this RUN) ----
 RUN export PYENV_ROOT="$HOME/.pyenv"; \
-    export PATH="$PYENV_ROOT/shims:$PYENV_ROOT/bin:$PATH"; \
-    eval "$("$PYENV_ROOT/bin/pyenv" init -)"; \
-    python3 --version; \
-    source "$NVM_DIR/nvm.sh"; corepack enable; \
-    yarn run build
+  export PATH="$PYENV_ROOT/shims:$PYENV_ROOT/bin:$PATH"; \
+  eval "$("$PYENV_ROOT/bin/pyenv" init -)"; \
+  python3 --version; \
+  source "$NVM_DIR/nvm.sh"; corepack enable; \
+  yarn run build
 
 # ---- package AppImage with a pinned electron-builder ----
 ENV ELECTRON_BUILDER_CACHE=/home/${USER}/.cache/electron-builder
 RUN source "$NVM_DIR/nvm.sh"; \
-    npx "electron-builder@${ELECTRON_BUILDER_VERSION}" --linux AppImage --publish=never \
-    --config.extraMetadata.environment=production
+  npx "electron-builder@${ELECTRON_BUILDER_VERSION}" --linux AppImage --publish=never \
+  --config.extraMetadata.environment=production
 
 # -------- exporter: only artifacts (owned by 1000:1000 by default) --------
 FROM debian:12-slim AS exporter
