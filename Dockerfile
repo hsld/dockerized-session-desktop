@@ -16,62 +16,74 @@
 #
 # Contact: https://github.com/hsld/dockerized-session-desktop/issues
 
-# Build Session Desktop AppImage entirely inside Debian 13 (trixie, with pyenv & f-string fix)
+# build session desktop appimage entirely inside Debian 13 (trixie)
 FROM debian:13-slim AS builder
 ARG DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash","-o","pipefail","-lc"]
 
-# ---- tweakables ----
+# tweakables
 ARG SESSION_REPO=https://github.com/session-foundation/session-desktop.git
-ARG SESSION_REF=v1.16.10
+ARG SESSION_REF=v1.17.2
 ARG USER=node
 ARG UID=1000
 ARG GID=1000
 ARG NODE_DEFAULT=20.18.2
-ARG ELECTRON_BUILDER_VERSION=24
+ARG ELECTRON_BUILDER_VERSION=24.13.3
 
 ENV CI=1 \
-  npm_config_fund=false \
-  npm_config_audit=false
+    HUSKY=0 \
+    NODE_OPTIONS=--max_old_space_size=4096 \
+    npm_config_fund=false \
+    npm_config_audit=false \
+    npm_config_update_notifier=false
 
-# ---- system deps ----
-RUN apt-get update && apt-get install -y --no-install-recommends \
-  ca-certificates curl git git-lfs gnupg build-essential \
-  cmake ninja-build pkg-config \
-  libx11-dev libxkbfile-dev libsecret-1-dev \
-  libgtk-3-0 libnss3 libasound2 \
-  fakeroot rpm dpkg xz-utils file \
-  make libssl-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev \
-  libffi-dev liblzma-dev tk-dev wget \
-  && rm -rf /var/lib/apt/lists/* \
-  && git lfs install --system
+# system deps
+RUN set -euo pipefail;\
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+    ca-certificates curl git git-lfs gnupg build-essential \
+    cmake ninja-build pkg-config \
+    libx11-dev libxkbfile-dev libsecret-1-dev \
+    libgtk-3-0 libnss3 libasound2 \
+    fakeroot rpm dpkg xz-utils file \
+    make libssl-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev \
+    libffi-dev liblzma-dev tk-dev wget; \
+    rm -rf /var/lib/apt/lists/*; \
+    git lfs install --system
 
-# ---- unprivileged user ----
-RUN groupadd -g ${GID} ${USER} && useradd -l -m -u ${UID} -g ${GID} ${USER}
+# unprivileged user
+RUN set -euo pipefail; \
+    groupadd -g "${GID}" "${USER}"; \
+    useradd -l -m -u "${UID}" -g "${GID}" "${USER}"
 USER ${USER}
 WORKDIR /home/${USER}
 
-# ---- Node via nvm ----
+# node via nvm
 ENV NVM_DIR=/home/${USER}/.nvm
-RUN mkdir -p "$NVM_DIR" && curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+RUN set -euo pipefail; \
+    mkdir -p "$NVM_DIR"; \
+    curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
 
-# ---- Python 3.12 via pyenv ----
+# python via pyenv
 ENV PYENV_ROOT=/home/${USER}/.pyenv
 ENV PATH=${PYENV_ROOT}/bin:${PYENV_ROOT}/shims:${PATH}
-RUN curl -fsSL https://pyenv.run | bash && \
-  export PYENV_ROOT="$HOME/.pyenv" && \
-  export PATH="$PYENV_ROOT/bin:$PATH" && \
-  "$PYENV_ROOT/bin/pyenv" install -s 3.12.5 && \
-  "$PYENV_ROOT/bin/pyenv" global 3.12.5 && \
-  eval "$("$PYENV_ROOT/bin/pyenv" init -)" && \
-  python3 --version
+RUN set -euo pipefail; \
+    curl -fsSL https://pyenv.run | bash; \
+    export PYENV_ROOT="$HOME/.pyenv"; \
+    export PATH="$PYENV_ROOT/bin:$PATH"; \
+    "$PYENV_ROOT/bin/pyenv" install -s 3.12.5; \
+    "$PYENV_ROOT/bin/pyenv" global 3.12.5; \
+    eval "$("$PYENV_ROOT/bin/pyenv" init -)"; \
+    python3 --version
 
-# ---- fetch source (pinned tag) ----
-RUN git clone --depth=1 --branch "${SESSION_REF}" "${SESSION_REPO}" app
+# fetch source (pinned tag)
+RUN set -euo pipefail; \
+    git clone --depth=1 --branch "${SESSION_REF}" "${SESSION_REPO}" app
 WORKDIR /home/${USER}/app
 
-# ---- compat patch ----
-RUN python3 - <<'PY'
+# compat patch
+RUN set -euo pipefail; \
+    python3 - <<'PY'
 from pathlib import Path
 import re
 p = Path("tools/localization/localeTypes.py")
@@ -102,46 +114,71 @@ p.write_text(s)
 print("localeTypes.py patched: constants ensured + joins normalized")
 PY
 
-# ---- tool versions & install deps ----
-RUN if [[ -f .nvmrc ]]; then NODE_VERSION="$(cat .nvmrc)"; else NODE_VERSION="${NODE_DEFAULT}"; fi; \
-  source "$NVM_DIR/nvm.sh"; \
-  nvm install "$NODE_VERSION"; \
-  nvm use "$NODE_VERSION"; \
-  corepack enable; \
-  yarn config set network-timeout 600000
+# tool versions & install deps
+ENV COREPACK_ENABLE_AUTO_PIN=0
+RUN set -euo pipefail; \
+    if [[ -f .nvmrc ]]; then NODE_VERSION="$(tr -d '\r\n' < .nvmrc)"; else NODE_VERSION="${NODE_DEFAULT}"; fi; \
+    . "$NVM_DIR/nvm.sh" --no-use; \
+    nvm install "$NODE_VERSION"; \
+    nvm use "$NODE_VERSION"; \
+    nvm alias default "$NODE_VERSION"; \
+    \
+    if [[ -f yarn.lock ]]; then \
+      if head -n1 yarn.lock | grep -q 'yarn lockfile v1'; then \
+        # yarn classic repo
+        corepack enable; \
+        corepack prepare yarn@1.22.22 --activate; \
+        yarn install --frozen-lockfile --non-interactive; \
+      else \
+        # yarn berry repo: prefer the repo-pinned yarnPath if present
+        if [[ -f .yarnrc.yml ]] && grep -q '^yarnPath:' .yarnrc.yml; then \
+          YARN_PATH="$(awk -F': ' '/^yarnPath:/{print $2}' .yarnrc.yml | tr -d "\"'")"; \
+          node "$YARN_PATH" install --immutable; \
+        else \
+          # Berry but no yarnPath committed: fall back to corepack/yarn as provided
+          corepack enable; \
+          yarn install --immutable; \
+        fi; \
+      fi; \
+    else \
+      npm ci || npm install; \
+    fi
 
-RUN source "$NVM_DIR/nvm.sh"; \
-  corepack enable; \
-  if [[ -f yarn.lock ]]; then \
-    yarn --version >/dev/null 2>&1; \
-    yarn install --immutable || yarn install; \
-  else \
-    (npm ci || npm install); \
-  fi
+# build
+RUN set -euo pipefail; \
+    source "$NVM_DIR/nvm.sh" && nvm use default; \
+    export PYENV_ROOT="$HOME/.pyenv"; \
+    export PATH="$PYENV_ROOT/bin:$PYENV_ROOT/shims:$PATH"; \
+    eval "$("$PYENV_ROOT/bin/pyenv" init -)"; \
+    python3 --version; \
+    corepack enable; \
+    yarn run build
 
-ENV HUSKY=0
-ENV NODE_OPTIONS=--max_old_space_size=4096
-
-# ---- build ----
-RUN export PYENV_ROOT="$HOME/.pyenv"; \
-  export PATH="$PYENV_ROOT/shims:$PYENV_ROOT/bin:$PATH"; \
-  eval "$("$PYENV_ROOT/bin/pyenv" init -)"; \
-  python3 --version; \
-  source "$NVM_DIR/nvm.sh"; corepack enable; \
-  yarn run build
-
-# ---- package AppImage ----
+# package AppImage
 ENV ELECTRON_BUILDER_CACHE=/home/${USER}/.cache/electron-builder
-RUN source "$NVM_DIR/nvm.sh"; \
-  npx "electron-builder@${ELECTRON_BUILDER_VERSION}" --linux AppImage --publish=never \
-  --config.extraMetadata.environment=production
+ENV USE_HARD_LINKS=false
+RUN set -euo pipefail; \
+    source "$NVM_DIR/nvm.sh" && nvm use default; \
+    export PYENV_ROOT="$HOME/.pyenv"; \
+    export PATH="$PYENV_ROOT/bin:$PYENV_ROOT/shims:$PATH"; \
+    python3 --version; \
+    rm -rf dist; \
+    USE_HARD_LINKS=false npx -y "electron-builder@${ELECTRON_BUILDER_VERSION}" \
+      --linux AppImage --publish=never \
+      --config.extraMetadata.environment=production
 
-# -------- exporter --------
+# exporter
 FROM debian:13-slim AS exporter
 SHELL ["/bin/bash","-o","pipefail","-lc"]
 ARG ARTIFACT_UID=1000
 ARG ARTIFACT_GID=1000
-RUN groupadd -g ${ARTIFACT_GID} app && useradd -l -m -u ${ARTIFACT_UID} -g ${ARTIFACT_GID} app
+ARG USER=node
+
+RUN set -euo pipefail; \
+    groupadd -g "${ARTIFACT_GID}" app; \
+    useradd -l -m -u "${ARTIFACT_UID}" -g "${ARTIFACT_GID}" app
 USER app
 WORKDIR /out
-COPY --from=builder --chown=app:app /home/node/app/dist/ /out/
+
+# copy only build artifacts
+COPY --from=builder --chown=app:app /home/${USER}/app/dist/ /out/
