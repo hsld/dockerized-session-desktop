@@ -26,40 +26,61 @@ set -euo pipefail
 # ----------------------------- config ---------------------------------
 REPO_SLUG="session-foundation/session-desktop"
 IMAGE_BASENAME="${IMAGE_BASENAME:-session-desktop-builder}"
-OUT_DIR="${OUT_DIR:-out}"              # override: OUT_DIR=/some/path ./build_session-desktop.sh
-DOCKERFILE="${DOCKERFILE:-Dockerfile}" # override if needed
-NO_CACHE="${NO_CACHE:-1}"              # set to 0 to allow cache
-PROGRESS="${PROGRESS:-auto}"           # auto|plain
+OUT_DIR="${OUT_DIR:-out}" \
+    # override: OUT_DIR=/some/path ./build_session-desktop.sh
+DOCKERFILE="${DOCKERFILE:-Dockerfile}" \
+    # override if needed
+NO_CACHE="${NO_CACHE:-1}" \
+    # set to 0 to allow cache
+PROGRESS="${PROGRESS:-auto}" \
+    # auto|plain
+
+# Session build args you can override
+LINUX_TARGETS="${LINUX_TARGETS:-AppImage}" # e.g. "AppImage deb rpm"
+PNPM_VERSION="${PNPM_VERSION:-10.6.4}"
+ARTIFACT_UID="${ARTIFACT_UID:-1000}"
+ARTIFACT_GID="${ARTIFACT_GID:-1000}"
 # ----------------------------------------------------------------------
 
-# Proivde some user comfort by telling them what we're doing
 say() { printf "\033[1;36m>> %s\033[0m\n" "$*"; }
 warn() { printf "\033[1;33m!! %s\033[0m\n" "$*"; }
-die() {
-    printf "\033[1;31mXX %s\033[0m\n" "$*"
-    exit 1
-}
+die() { printf "\033[1;31mXX %s\033[0m\n" "$*"; exit 1; }
 
-# Make sure all dependancies are satisfied
 need() { command -v "$1" >/dev/null 2>&1 || die "Missing dependency: $1"; }
 need docker
 need curl
 need git
 
-# Get whatever is currently latest (from API)
+ensure_builder() {
+    if ! docker buildx inspect sesd >/dev/null 2>&1; then
+        say "Creating buildx builder 'sesd' (docker-container)…"
+        docker buildx create --name sesd --driver docker-container --use \
+            >/dev/null
+    else
+        docker buildx use sesd >/dev/null
+    fi
+    docker buildx inspect --bootstrap >/dev/null
+}
+
 latest_tag_from_api() {
     local tag=""
     if command -v jq >/dev/null 2>&1; then
-        tag="$(curl -fsSL "https://api.github.com/repos/${REPO_SLUG}/releases/latest" | jq -r .tag_name 2>/dev/null || true)"
+        tag="$(
+            curl -fsSL \
+                "https://api.github.com/repos/${REPO_SLUG}/releases/latest" |
+                jq -r .tag_name 2>/dev/null || true
+        )"
     else
-        tag="$(curl -fsSL "https://api.github.com/repos/${REPO_SLUG}/releases/latest" |
-            grep -m1 -Eo '"tag_name"\s*:\s*"[^"]+"' |
-            sed -E 's/.*"tag_name"\s*:\s*"([^"]+)".*/\1/' || true)"
+        tag="$(
+            curl -fsSL \
+                "https://api.github.com/repos/${REPO_SLUG}/releases/latest" |
+                grep -m1 -Eo '"tag_name"\s*:\s*"[^"]+"' |
+                sed -E 's/.*"tag_name"\s*:\s*"([^"]+)".*/\1/' || true
+        )"
     fi
     printf "%s" "${tag}"
 }
 
-# Get whatever is currently latest (from refs)
 latest_tag_from_refs() {
     git ls-remote --tags "https://github.com/${REPO_SLUG}.git" |
         awk -F/ '/refs\/tags\/v?[0-9]/{print $3}' |
@@ -68,7 +89,6 @@ latest_tag_from_refs() {
         tail -1
 }
 
-# Pick a ref to build if none was specified
 pick_tag() {
     local arg_tag="${1:-}"
     if [[ -n "${arg_tag}" ]]; then
@@ -89,49 +109,11 @@ pick_tag() {
     printf "%s" "${t}"
 }
 
-# Enable the build kit
 enable_buildkit() {
     export DOCKER_BUILDKIT=1
     export COMPOSE_DOCKER_CLI_BUILD=1
 }
 
-# Export artifacts to user filesystem
-copy_out() {
-    local cid="$1" dst="${OUT_DIR}"
-    say "Exporting AppImage artifact(s) only…"
-    umask 022
-    rm -rf "${dst}"
-    mkdir -p "${dst}"
-    docker cp "${cid}:/out/." - |
-        tar --extract --no-same-owner --no-same-permissions --directory "${dst}"
-    echo ">> Done. Artifacts in: ${dst}"
-    ls -lh "${dst}" || true
-}
-
-#  Clean up after the build process finished
-clean_objects() {
-    local cid="$1" img="$2"
-    (
-        set +e
-        [[ -n "${cid}" ]] && docker rm -f "${cid}" >/dev/null 2>&1
-        [[ -n "${img}" ]] && docker rmi -f "${img}" >/dev/null 2>&1
-    )
-}
-
-#
-# The actual build process looks like this:
-#
-# 1. Determine build ref
-# 2. Announce target
-# 3. Enable build kit
-# 4. Validate docker file
-# 5. Prepare build args
-# 6. Build image
-# 7. Create container
-# 8. Set cleanup trap
-# 9. Extract artifacts
-# 10. Cleanup
-#
 main() {
     local want_tag
     want_tag="$(pick_tag "${1:-}")"
@@ -140,23 +122,33 @@ main() {
     enable_buildkit
     [[ -f "${DOCKERFILE}" ]] || die "Dockerfile not found at: ${DOCKERFILE}"
 
-    local build_args=(--pull --file "${DOCKERFILE}" --build-arg "SESSION_REF=${want_tag}" --progress "${PROGRESS}")
-    if [[ "${NO_CACHE}" == "1" ]]; then build_args+=(--no-cache); fi
+    ensure_builder
 
-    local image_tag="${IMAGE_BASENAME}:${want_tag}"
-    say "Docker build → ${image_tag}"
-    docker build "${build_args[@]}" -t "${image_tag}" .
+    local build_args=(
+        --pull
+        --file "${DOCKERFILE}"
+        --progress "${PROGRESS}"
+        --target exporter
+        --build-arg "SESSION_REF=${want_tag}"
+        --build-arg "LINUX_TARGETS=${LINUX_TARGETS}"
+        --build-arg "PNPM_VERSION=${PNPM_VERSION}"
+        --build-arg "ARTIFACT_UID=${ARTIFACT_UID}"
+        --build-arg "ARTIFACT_GID=${ARTIFACT_GID}"
+    )
+    if [[ "${NO_CACHE}" == "1" ]]; then
+        build_args+=(--no-cache)
+    fi
 
-    say "Creating ephemeral container to copy artifacts…"
-    local cid
-    cid="$(docker create "${image_tag}")"
-    trap "clean_objects '${cid}' '${image_tag}'" EXIT
+    say "Exporting artifacts directly to: ${OUT_DIR}"
+    rm -rf "${OUT_DIR}"
+    mkdir -p "${OUT_DIR}"
 
-    copy_out "${cid}"
+    docker buildx build "${build_args[@]}" \
+        --output "type=local,dest=${OUT_DIR}" \
+        .
 
-    say "Removing the build image to keep Docker tidy…"
-    clean_objects "${cid}" "${image_tag}"
-    trap - EXIT
+    say ">> Done. Artifacts in: ${OUT_DIR}"
+    ls -lh "${OUT_DIR}" || true
 }
 
 main "$@"

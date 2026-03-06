@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 # dockerized-session-desktop
 # Copyright (C) 2025 hsld <62700359+hsld@users.noreply.github.com>
 #
@@ -19,87 +21,135 @@
 # build session desktop appimage entirely inside Debian 13 (trixie)
 FROM debian:13-slim AS builder
 ARG DEBIAN_FRONTEND=noninteractive
-SHELL ["/bin/bash","-o","pipefail","-lc"]
+SHELL ["/bin/bash", "-o", "pipefail", "-lc"]
 
 # tweakables
 ARG SESSION_REPO=https://github.com/session-foundation/session-desktop.git
-ARG SESSION_REF=v1.17.2
+ARG SESSION_REF=v1.17.12
 ARG USER=node
 ARG UID=1000
 ARG GID=1000
-ARG NODE_DEFAULT=20.18.2
-# ARG ELECTRON_BUILDER_VERSION=24.13.3
+
+# Pin exact Node version (the repo enforces this via engines.node)
+ARG NODE_VERSION=24.12.0
+ARG NODE_DISTRO=linux-x64
+
+# package tooling
+ARG PNPM_VERSION=10.6.4
 ARG ELECTRON_BUILDER_VERSION=26.0.0
+ARG LINUX_TARGETS=AppImage
 
 ENV CI=1 \
     HUSKY=0 \
     NODE_OPTIONS=--max_old_space_size=4096 \
     npm_config_fund=false \
     npm_config_audit=false \
-    npm_config_update_notifier=false
+    npm_config_update_notifier=false \
+    COREPACK_ENABLE_AUTO_PIN=0 \
+    USE_HARD_LINKS=false
 
-# system deps
-RUN set -euo pipefail;\
+# helpful cache locations (explicit + avoids surprises)
+ENV XDG_CACHE_HOME=/home/${USER}/.cache \
+    COREPACK_HOME=/home/${USER}/.cache/node/corepack \
+    ELECTRON_BUILDER_CACHE=/home/${USER}/.cache/electron-builder \
+    PNPM_STORE_DIR=/home/${USER}/.local/share/pnpm/store
+
+# system deps (+ python3 from apt; no pyenv)
+RUN set -eu; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
     ca-certificates curl git git-lfs gnupg build-essential \
+    python3 python3-pip \
     cmake ninja-build pkg-config \
     libx11-dev libxkbfile-dev libsecret-1-dev \
     libgtk-3-0 libnss3 libasound2 \
     fakeroot rpm dpkg xz-utils file \
-    make libssl-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev \
-    libffi-dev liblzma-dev tk-dev wget; \
+    wget; \
     rm -rf /var/lib/apt/lists/*; \
-    git lfs install --system
+    git lfs install --system; \
+    python3 --version
+
+# Node.js (pinned exact version from nodejs.org tarball)
+# BuildKit improvement: cache the downloaded tarball between builds.
+RUN --mount=type=cache,id=session-node-tarball,target=/tmp/node-tarball \
+    set -eu; \
+    mkdir -p /tmp/node-tarball; \
+    cd /tmp/node-tarball; \
+    TARBALL="node-v${NODE_VERSION}-${NODE_DISTRO}.tar.xz"; \
+    if [[ ! -f "${TARBALL}" ]]; then \
+    curl -fL -o "${TARBALL}" \
+    "https://nodejs.org/dist/v${NODE_VERSION}/${TARBALL}"; \
+    fi; \
+    rm -rf "node-v${NODE_VERSION}-${NODE_DISTRO}"; \
+    tar -xJf "${TARBALL}"; \
+    cp -a "node-v${NODE_VERSION}-${NODE_DISTRO}/." /usr/local/; \
+    node --version; \
+    npm --version
+
+# corepack pnpm (deterministic)
+# NOTE: corepack creates shims in /usr/local/bin, so run as root here.
+RUN set -eu; \
+    corepack enable; \
+    corepack prepare "pnpm@${PNPM_VERSION}" --activate; \
+    pnpm --version
 
 # unprivileged user
-RUN set -euo pipefail; \
+RUN set -eu; \
     groupadd -g "${GID}" "${USER}"; \
-    useradd -l -m -u "${UID}" -g "${GID}" "${USER}"
+    useradd -l -m -u "${UID}" -g "${GID}" "${USER}"; \
+    # IMPORTANT: ensure the home directory is owned by the unprivileged user
+    chown -R "${UID}:${GID}" "/home/${USER}"
+
 USER ${USER}
 WORKDIR /home/${USER}
 
-# node via nvm
-ENV NVM_DIR=/home/${USER}/.nvm
-RUN set -euo pipefail; \
-    mkdir -p "$NVM_DIR"; \
-    curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-
-# python via pyenv
-ENV PYENV_ROOT=/home/${USER}/.pyenv
-ENV PATH=${PYENV_ROOT}/bin:${PYENV_ROOT}/shims:${PATH}
-RUN set -euo pipefail; \
-    curl -fsSL https://pyenv.run | bash; \
-    export PYENV_ROOT="$HOME/.pyenv"; \
-    export PATH="$PYENV_ROOT/bin:$PATH"; \
-    "$PYENV_ROOT/bin/pyenv" install -s 3.12.5; \
-    "$PYENV_ROOT/bin/pyenv" global 3.12.5; \
-    eval "$("$PYENV_ROOT/bin/pyenv" init -)"; \
-    python3 --version
+# ensure cache roots exist and are writable by the unprivileged user
+RUN set -eu; \
+    mkdir -p \
+    "${COREPACK_HOME}" \
+    "${ELECTRON_BUILDER_CACHE}" \
+    "${PNPM_STORE_DIR}"
 
 # fetch source (pinned tag)
-RUN set -euo pipefail; \
-    git clone --depth=1 --branch "${SESSION_REF}" "${SESSION_REPO}" app
+# IMPORTANT: bring submodules. One submodule is configured as SSH; rewrite to
+# HTTPS for container builds.
+RUN set -eu; \
+    git config --global --add url."https://github.com/".insteadOf "git@github.com:"; \
+    git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"; \
+    git clone --depth=1 --branch "${SESSION_REF}" "${SESSION_REPO}" app; \
+    cd app; \
+    if [[ -f .gitmodules ]]; then \
+    sed -i 's|git@github.com:|https://github.com/|g' .gitmodules; \
+    sed -i 's|ssh://git@github.com/|https://github.com/|g' .gitmodules; \
+    fi; \
+    git submodule sync --recursive; \
+    git -c protocol.file.allow=always submodule update --init --recursive --depth=1; \
+    git lfs pull || true
+
 WORKDIR /home/${USER}/app
 
 # compat patch
-RUN set -euo pipefail; \
+RUN set -eu; \
     python3 - <<'PY'
 from pathlib import Path
 import re
+
 p = Path("tools/localization/localeTypes.py")
 if not p.exists():
     print("Patch note: localeTypes.py not present; skipping.")
     raise SystemExit(0)
+
 s = p.read_text()
 if "SEP_NL" not in s or "SEP_COMMA_NL" not in s:
     lines = s.splitlines()
     insert_at = 0
     for i, line in enumerate(lines[:120]):
-        if (line.startswith(("from ", "import ")) or
-            line.startswith("#") or
-            line.strip() == "" or
-            line.startswith(("#!/", "# -*-"))):
+        if (
+            line.startswith(("from ", "import "))
+            or line.startswith("#")
+            or line.strip() == ""
+            or line.startswith(("#!/", "# -*-"))
+        ):
             insert_at = i + 1
             continue
         break
@@ -115,71 +165,60 @@ p.write_text(s)
 print("localeTypes.py patched: constants ensured + joins normalized")
 PY
 
-# tool versions & install deps
-ENV COREPACK_ENABLE_AUTO_PIN=0
-RUN set -euo pipefail; \
-    if [[ -f .nvmrc ]]; then NODE_VERSION="$(tr -d '\r\n' < .nvmrc)"; else NODE_VERSION="${NODE_DEFAULT}"; fi; \
-    . "$NVM_DIR/nvm.sh" --no-use; \
-    nvm install "$NODE_VERSION"; \
-    nvm use "$NODE_VERSION"; \
-    nvm alias default "$NODE_VERSION"; \
-    \
-    if [[ -f yarn.lock ]]; then \
-      if head -n1 yarn.lock | grep -q 'yarn lockfile v1'; then \
-        # yarn classic repo
-        corepack enable; \
-        corepack prepare yarn@1.22.22 --activate; \
-        yarn install --frozen-lockfile --non-interactive; \
-      else \
-        # yarn berry repo: prefer the repo-pinned yarnPath if present
-        if [[ -f .yarnrc.yml ]] && grep -q '^yarnPath:' .yarnrc.yml; then \
-          YARN_PATH="$(awk -F': ' '/^yarnPath:/{print $2}' .yarnrc.yml | tr -d "\"'")"; \
-          node "$YARN_PATH" install --immutable; \
-        else \
-          # Berry but no yarnPath committed: fall back to corepack/yarn as provided
-          corepack enable; \
-          yarn install --immutable; \
-        fi; \
-      fi; \
-    else \
-      npm ci || npm install; \
-    fi
+# install deps (pnpm)
+# BuildKit improvement: cache pnpm store between builds (writable by uid/gid)
+RUN --mount=type=cache,id=session-pnpm-store,target=/home/${USER}/.local/share/pnpm/store,uid=${UID},gid=${GID},mode=0775 \
+    set -eu; \
+    pnpm config set store-dir "${PNPM_STORE_DIR}"; \
+    pnpm install --frozen-lockfile
 
 # build
-RUN set -euo pipefail; \
-    source "$NVM_DIR/nvm.sh" && nvm use default; \
-    export PYENV_ROOT="$HOME/.pyenv"; \
-    export PATH="$PYENV_ROOT/bin:$PYENV_ROOT/shims:$PATH"; \
-    eval "$("$PYENV_ROOT/bin/pyenv" init -)"; \
-    python3 --version; \
-    corepack enable; \
-    yarn run build
+RUN set -eu; \
+    pnpm run build
 
-# package AppImage
-ENV ELECTRON_BUILDER_CACHE=/home/${USER}/.cache/electron-builder
-ENV USE_HARD_LINKS=false
-RUN set -euo pipefail; \
-    source "$NVM_DIR/nvm.sh" && nvm use default; \
-    export PYENV_ROOT="$HOME/.pyenv"; \
-    export PATH="$PYENV_ROOT/bin:$PYENV_ROOT/shims:$PATH"; \
-    python3 --version; \
-    rm -rf dist; \
-    USE_HARD_LINKS=false npx -y "electron-builder@${ELECTRON_BUILDER_VERSION}" \
-      --linux AppImage --publish=never \
-      --config.extraMetadata.environment=production
+# package AppImage (electron-builder)
+# BuildKit improvement: cache electron-builder downloads between builds
+# (writable by uid/gid)
+RUN --mount=type=cache,id=session-electron-builder-cache,target=/home/${USER}/.cache/electron-builder,uid=${UID},gid=${GID},mode=0775 \
+    set -eu; \
+    rm -rf dist release; \
+    mkdir -p "${ELECTRON_BUILDER_CACHE}"; \
+    if pnpm exec electron-builder --version >/dev/null 2>&1; then \
+    USE_HARD_LINKS=false ELECTRON_BUILDER_PUBLISH=never CI=false \
+    pnpm exec electron-builder \
+    --linux "${LINUX_TARGETS}" --publish=never \
+    --config.extraMetadata.environment=production; \
+    else \
+    USE_HARD_LINKS=false ELECTRON_BUILDER_PUBLISH=never CI=false \
+    pnpm dlx "electron-builder@${ELECTRON_BUILDER_VERSION}" \
+    --linux "${LINUX_TARGETS}" --publish=never \
+    --config.extraMetadata.environment=production; \
+    fi; \
+    if [[ ! -d release ]]; then \
+    echo "ERROR: packaging completed but no release/ directory was created"; \
+    echo "Repository contents after packaging:"; \
+    find . -maxdepth 3 \( -type d -o -type f \) | sort | sed -n '1,300p'; \
+    exit 1; \
+    fi; \
+    echo "Packaged files:"; \
+    find release -maxdepth 3 -type f | sort
 
-# exporter
-FROM debian:13-slim AS exporter
-SHELL ["/bin/bash","-o","pipefail","-lc"]
+# collect artifacts so exporter does not fail on optional files
+RUN set -eu; \
+    mkdir -p /home/${USER}/export; \
+    if [[ -d release ]]; then \
+    find release -maxdepth 3 -type f \
+    \( -name '*.AppImage' -o -name '*.AppImage.zsync' -o -name '*.blockmap' \) \
+    -exec cp -t /home/${USER}/export {} +; \
+    fi; \
+    echo "Exported artifacts:"; \
+    ls -la /home/${USER}/export; \
+    test -n "$(find /home/${USER}/export -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
+
+# exporter (artifacts only; buildx local output should contain only these files)
+FROM scratch AS exporter
 ARG ARTIFACT_UID=1000
 ARG ARTIFACT_GID=1000
-ARG USER=node
 
-RUN set -euo pipefail; \
-    groupadd -g "${ARTIFACT_GID}" app; \
-    useradd -l -m -u "${ARTIFACT_UID}" -g "${ARTIFACT_GID}" app
-USER app
-WORKDIR /out
-
-# copy only build artifacts
-COPY --from=builder --chown=app:app /home/${USER}/app/dist/ /out/
+# export only the AppImage (+ common companion files)
+COPY --from=builder --chown=${ARTIFACT_UID}:${ARTIFACT_GID} /home/node/export/ /
